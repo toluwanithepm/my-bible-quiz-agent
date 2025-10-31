@@ -1,6 +1,38 @@
-// src/mastra/routes/a2a-agent-route.ts
 import { registerApiRoute } from '@mastra/core/server';
 import { randomUUID } from 'crypto';
+interface A2APart {
+  kind: 'text' | 'data';
+  text?: string;
+  data?: any;
+}
+
+interface A2AMessage {
+  role: string;
+  parts?: A2APart[];
+  messageId?: string;
+  taskId?: string;
+}
+
+interface BibleQuestion {
+  id: number;
+  question: string;
+  options: {
+    A: string;
+    B: string;
+    C: string;
+    D: string;
+  };
+  correctAnswer: 'A' | 'B' | 'C' | 'D';
+  difficulty: 'easy' | 'medium' | 'hard';
+  category: string;
+}
+
+interface BibleQuizToolOutput {
+  questions: BibleQuestion[];
+  generatedAt: string;
+  mode: string;
+  totalQuestions: number;
+}
 
 export const a2aAgentRoute = registerApiRoute('/a2a/agent/:agentId', {
   method: 'POST',
@@ -40,42 +72,28 @@ export const a2aAgentRoute = registerApiRoute('/a2a/agent/:agentId', {
       // Extract messages from params
       const { message, messages, contextId, taskId, metadata } = params || {};
 
-interface A2AMessagePart {
-  kind: 'text' | 'data';
-  text?: string;
-  data?: any;
-}
-
-interface A2AMessage {
-  role: string;
-  parts: A2AMessagePart[];
-  messageId?: string;
-  taskId?: string;
-}
-
       let messagesList: A2AMessage[] = [];
       if (message) {
-        messagesList = [message];
+        messagesList = [message as A2AMessage];
       } else if (messages && Array.isArray(messages)) {
-        messagesList = messages;
+        messagesList = messages as A2AMessage[];
       }
 
-      // Convert A2A messages to Mastra format
-      const mastraMessages: string[] = messagesList.map((msg) => {
-        const content = msg.parts?.map((part) => {
+      // Convert A2A messages to Mastra format (assuming agent.generate expects string[])
+      const mastraMessages: string[] = messagesList.map((msg) =>
+        msg.parts?.map((part) => {
           if (part.kind === 'text') return part.text;
           if (part.kind === 'data') return JSON.stringify(part.data);
           return '';
-        }).join('\n') || '';
-        return `${msg.role}: ${content}`;
-      });
+        }).join('\n') || ''
+      );
 
       // Execute agent
       const response = await agent.generate(mastraMessages);
       const agentText = response.text || '';
 
       // Build artifacts array
-      const artifacts: any[] = [
+      const artifacts: { artifactId: string; name: string; parts: A2APart[]; }[] = [
         {
           artifactId: randomUUID(),
           name: `${agentId}Response`,
@@ -83,8 +101,9 @@ interface A2AMessage {
         }
       ];
 
-      // Add tool results as artifacts
+      // Add tool results as artifacts with better formatting
       if (response.toolResults && response.toolResults.length > 0) {
+        // Add structured tool results
         artifacts.push({
           artifactId: randomUUID(),
           name: 'ToolResults',
@@ -92,6 +111,38 @@ interface A2AMessage {
             kind: 'data',
             data: result
           }))
+        });
+
+        // Also add formatted text version if it's quiz data
+        response.toolResults.forEach((toolResultChunk) => {
+          // Safely check if the tool result chunk contains BibleQuizToolOutput in its payload.output
+          if (toolResultChunk.type === 'tool-result' && toolResultChunk.payload && 'output' in toolResultChunk.payload) {
+            const toolOutput = toolResultChunk.payload.output;
+            // Refined type narrowing for toolOutput
+            if (
+              typeof toolOutput === 'object' &&
+              toolOutput !== null &&
+              'questions' in toolOutput &&
+              Array.isArray((toolOutput as any).questions) && // Check if 'questions' exists and is an array
+              'generatedAt' in toolOutput && typeof (toolOutput as any).generatedAt === 'string' &&
+              'mode' in toolOutput && typeof (toolOutput as any).mode === 'string' &&
+              'totalQuestions' in toolOutput && typeof (toolOutput as any).totalQuestions === 'number'
+            ) {
+              const quizResult = toolOutput as BibleQuizToolOutput;
+              const formattedQuestions = quizResult.questions.map((q, idx) => {
+                return `Question ${idx + 1}: ${q.question}\nA) ${q.options.A}\nB) ${q.options.B}\nC) ${q.options.C}\nD) ${q.options.D}\n[Difficulty: ${q.difficulty} | Category: ${q.category}]\n`;
+              }).join('\n');
+
+              artifacts.push({
+                artifactId: randomUUID(),
+                name: 'FormattedQuiz',
+                parts: [{
+                  kind: 'text',
+                  text: `📚 Bible Quiz Questions\nGenerated: ${quizResult.generatedAt}\nMode: ${quizResult.mode}\nTotal: ${quizResult.totalQuestions}\n\n${formattedQuestions}`
+                }]
+              });
+            }
+          }
         });
       }
 
